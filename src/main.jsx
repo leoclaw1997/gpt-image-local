@@ -172,39 +172,7 @@ function App() {
   }
 
   async function saveConfig() {
-    setConfigSaving(true);
-    setConfigError('');
-    setConfigSuccess('');
-
-    try {
-      const response = await fetch('/api/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          website: config.website,
-          baseUrl: config.baseUrl,
-          imagePath: config.imagePath,
-          apiKey: config.apiKey,
-        }),
-      });
-      const text = await response.text();
-      const payload = text && text.trim().startsWith('{') ? JSON.parse(text) : null;
-
-      if (!response.ok || !payload) {
-        throw new Error(payload?.error || '保存模型配置失败，请重启本地后端服务。');
-      }
-
-      setConfig({ ...payload, apiKey: '' });
-      setConfigSuccess('配置已保存，新的生成请求会立即使用此配置。');
-      setTimeout(() => {
-        setConfigOpen(false);
-        setConfigSuccess('');
-      }, 1500);
-    } catch (err) {
-      setConfigError(err.message);
-    } finally {
-      setConfigSaving(false);
-    }
+    setConfigError('线上版本的配置由服务端环境变量管理，请在 Vercel 后台修改。');
   }
 
   async function generateImage() {
