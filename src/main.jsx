@@ -137,23 +137,56 @@ function App() {
     };
   }, []);
 
-  async function loadConfig() {
+  function maskApiKey(apiKey) {
+    if (!apiKey) return '';
+    if (apiKey.length <= 10) return `${apiKey.slice(0, 3)}...`;
+    return `${apiKey.slice(0, 5)}...${apiKey.slice(-4)}`;
+  }
+
+  function normalizeBaseUrl(value) {
+    const baseUrl = String(value || '').trim().replace(/\/+$/, '');
+    if (!baseUrl) return '';
+    if (!/^https?:\/\//.test(baseUrl)) {
+      throw new Error('请求 API 地址必须以 http:// 或 https:// 开头。');
+    }
+    return baseUrl;
+  }
+
+  function normalizeWebsite(value) {
+    const website = String(value || '').trim().replace(/\/+$/, '');
+    if (!website) return '';
+    if (!/^https?:\/\//.test(website)) {
+      throw new Error('官方网站必须以 http:// 或 https:// 开头。');
+    }
+    return website;
+  }
+
+  function normalizeImagePath(value) {
+    const imagePath = String(value || '/images/generations').trim() || '/images/generations';
+    if (/^https?:\/\//.test(imagePath)) {
+      throw new Error('请求接口只能填写路径，例如 /images/generations。');
+    }
+    return `/${imagePath.replace(/^\/+/, '').replace(/\/+$/, '')}`;
+  }
+
+  function loadConfig() {
     setConfigLoading(true);
     setConfigError('');
     setConfigSuccess('');
 
     try {
-      const response = await fetch('/api/config');
-      const text = await response.text();
-      const payload = text && text.trim().startsWith('{') ? JSON.parse(text) : null;
-
-      if (!response.ok || !payload) {
-        throw new Error(payload?.error || '读取模型配置失败，请重启本地后端服务。');
-      }
-
-      setConfig({ ...payload, apiKey: '' });
+      const stored = JSON.parse(localStorage.getItem('gpt-image-config') || '{}');
+      const apiKey = stored.apiKey || '';
+      setConfig({
+        website: stored.website || '',
+        baseUrl: stored.baseUrl || '',
+        imagePath: stored.imagePath || '/images/generations',
+        apiKey: '',
+        hasApiKey: Boolean(apiKey),
+        maskedApiKey: maskApiKey(apiKey),
+      });
     } catch (err) {
-      setConfigError(err.message);
+      setConfigError('读取本地配置失败。');
     } finally {
       setConfigLoading(false);
     }
@@ -172,7 +205,38 @@ function App() {
   }
 
   async function saveConfig() {
-    setConfigError('线上版本的配置由服务端环境变量管理，请在 Vercel 后台修改。');
+    setConfigSaving(true);
+    setConfigError('');
+    setConfigSuccess('');
+
+    try {
+      const stored = JSON.parse(localStorage.getItem('gpt-image-config') || '{}');
+      const next = {
+        website: normalizeWebsite(config.website),
+        baseUrl: normalizeBaseUrl(config.baseUrl),
+        imagePath: normalizeImagePath(config.imagePath),
+        apiKey: config.apiKey.trim() || stored.apiKey || '',
+      };
+      localStorage.setItem('gpt-image-config', JSON.stringify(next));
+
+      setConfig({
+        website: next.website,
+        baseUrl: next.baseUrl,
+        imagePath: next.imagePath,
+        apiKey: '',
+        hasApiKey: Boolean(next.apiKey),
+        maskedApiKey: maskApiKey(next.apiKey),
+      });
+      setConfigSuccess('配置已保存到本地浏览器。');
+      setTimeout(() => {
+        setConfigOpen(false);
+        setConfigSuccess('');
+      }, 1500);
+    } catch (err) {
+      setConfigError(err.message);
+    } finally {
+      setConfigSaving(false);
+    }
   }
 
   async function generateImage() {
@@ -180,29 +244,62 @@ function App() {
     setLoading(true);
 
     try {
-      const response = await fetch('/api/generate-image', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, size, quality, n: count }),
-      });
-
-      const text = await response.text();
-      const payload = text ? JSON.parse(text) : {};
-
-      if (!response.ok) {
-        throw new Error(payload.error || `图片生成失败，服务返回 ${response.status}。`);
+      const stored = JSON.parse(localStorage.getItem('gpt-image-config') || '{}');
+      if (!stored.apiKey || !stored.baseUrl) {
+        throw new Error('请先在「模型配置」中填入请求 API 地址和 API Key。');
       }
+
+      if (typeof prompt !== 'string' || !prompt.trim()) {
+        throw new Error('请输入图片提示词。');
+      }
+
+      const imageCount = Math.min(Math.max(Number(count) || 1, 1), 4);
+      const baseUrl = String(stored.baseUrl).replace(/\/+$/, '');
+      const imagePath = `/${String(stored.imagePath || '/images/generations').replace(/^\/+/, '').replace(/\/+$/, '')}`;
+      const results = [];
+
+      for (let index = 0; index < imageCount; index += 1) {
+        const response = await fetch('/api/proxy', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-target-url': `${baseUrl}${imagePath}`,
+            'x-api-key': stored.apiKey,
+          },
+          body: JSON.stringify({
+            model: 'gpt-image-2',
+            prompt: prompt.trim(),
+            size,
+            quality,
+            n: 1,
+          }),
+        });
+
+        const text = await response.text();
+        const payload = text && text.trim().startsWith('{') ? JSON.parse(text) : null;
+
+        if (!response.ok || !payload) {
+          throw new Error(payload?.error?.message || payload?.error || `图片生成失败，上游返回 ${response.status}。`);
+        }
+
+        results.push(...payload.data);
+      }
+
+      const images = results.map((image) => ({
+        url: image.url,
+        b64_json: image.b64_json,
+      }));
 
       const createdAt = new Date();
       const dateStr = `${createdAt.getFullYear()}-${String(createdAt.getMonth() + 1).padStart(2, '0')}-${String(createdAt.getDate()).padStart(2, '0')}`;
 
-      setImages(payload.images);
+      setImages(images);
       setHistory(await saveHistoryItem({
         id: createdAt.getTime(),
         prompt,
         size,
         quality,
-        images: payload.images,
+        images,
         date: dateStr,
         createdAt: createdAt.toLocaleString(),
       }));
@@ -219,10 +316,10 @@ function App() {
         <div>
           <p className="eyebrow">GPT Image Studio</p>
           <h1>本地 AI 图片生成工作台</h1>
-          <p className="subtitle">用 gpt-image-2 生成图片，API Key 只保存在本地后端。</p>
+          <p className="subtitle">用 gpt-image-2 生成图片，API Key 仅保存在你当前浏览器。</p>
         </div>
         <div className="hero-actions">
-          <div className="status-pill">本地代理 · 浏览器创作</div>
+          <div className="status-pill">浏览器直连 · 本地存储</div>
           <button className="config-button" type="button" onClick={openConfigPanel}>模型配置</button>
         </div>
       </section>
