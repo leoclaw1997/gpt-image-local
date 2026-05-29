@@ -1,6 +1,17 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
+import { base64ToBlob, generateImages } from './imagesApi';
+import {
+  createId,
+  defaultConfig,
+  listHistory,
+  normalizeBaseUrl,
+  normalizeImagePath,
+  readStoredConfig,
+  saveHistoryItem,
+  saveStoredConfig,
+} from './storage';
 
 const sizes = [
   { label: '1:1 方图', value: '1024x1024' },
@@ -23,56 +34,22 @@ const presets = [
   '治愈系插画，暖色调，柔软笔触，可爱角色',
 ];
 
-const dbName = 'gpt-image-local-db';
-const storeName = 'history';
-
-function openHistoryDb() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(dbName, 1);
-
-    request.onupgradeneeded = () => {
-      request.result.createObjectStore(storeName, { keyPath: 'id' });
-    };
-
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-async function getHistory() {
-  const db = await openHistoryDb();
-
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction(storeName, 'readonly');
-    const request = transaction.objectStore(storeName).getAll();
-
-    request.onsuccess = () => {
-      const items = request.result.sort((a, b) => b.id - a.id).map((item) => {
-        const d = new Date(item.id);
-        return { ...item, date: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` };
-      });
-      resolve(items);
-    };
-    request.onerror = () => reject(request.error);
-  });
-}
-
-async function saveHistoryItem(item) {
-  const db = await openHistoryDb();
-
-  await new Promise((resolve, reject) => {
-    const transaction = db.transaction(storeName, 'readwrite');
-    transaction.objectStore(storeName).put(item);
-    transaction.oncomplete = resolve;
-    transaction.onerror = () => reject(transaction.error);
-  });
-
-  return getHistory();
-}
-
 function imageSource(image) {
+  if (image.previewUrl) return image.previewUrl;
   if (image.url) return image.url;
   return `data:image/png;base64,${image.b64_json}`;
+}
+
+function displayConfig(config) {
+  return {
+    ...defaultConfig,
+    ...config,
+    apiKey: '',
+  };
+}
+
+function dateString(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 
 function App() {
@@ -90,9 +67,7 @@ function App() {
   const [configError, setConfigError] = useState('');
   const [configSuccess, setConfigSuccess] = useState('');
   const [config, setConfig] = useState({
-    website: '',
-    baseUrl: '',
-    imagePath: '/images/generations',
+    ...defaultConfig,
     apiKey: '',
     hasApiKey: false,
     maskedApiKey: '',
@@ -110,13 +85,19 @@ function App() {
     () => [...new Set(history.map((item) => item.date).filter(Boolean))],
     [history]
   );
-  const filteredHistory = useMemo(
-    () => history.filter((item) => !historyDate || item.date === historyDate),
+  const historyImageItems = useMemo(
+    () => history
+      .filter((item) => !historyDate || item.date === historyDate)
+      .flatMap((item) => (item.images || []).map((image, index) => ({
+        ...item,
+        image,
+        imageIndex: index,
+      }))),
     [history, historyDate]
   );
 
   useEffect(() => {
-    getHistory()
+    listHistory()
       .then(setHistory)
       .catch(() => setHistory([]));
   }, []);
@@ -143,15 +124,7 @@ function App() {
     setConfigSuccess('');
 
     try {
-      const response = await fetch('/api/config');
-      const text = await response.text();
-      const payload = text && text.trim().startsWith('{') ? JSON.parse(text) : null;
-
-      if (!response.ok || !payload) {
-        throw new Error(payload?.error || '读取模型配置失败，请重启本地后端服务。');
-      }
-
-      setConfig({ ...payload, apiKey: '' });
+      setConfig(displayConfig(await readStoredConfig()));
     } catch (err) {
       setConfigError(err.message);
     } finally {
@@ -172,7 +145,40 @@ function App() {
   }
 
   async function saveConfig() {
-    setConfigError('线上版本的配置由服务端环境变量管理，请在 Vercel 后台修改。');
+    setConfigSaving(true);
+    setConfigError('');
+    setConfigSuccess('');
+
+    try {
+      const current = await readStoredConfig();
+      const next = {
+        website: normalizeBaseUrl(config.website),
+        baseUrl: normalizeBaseUrl(config.baseUrl),
+        imagePath: normalizeImagePath(config.imagePath),
+        model: String(config.model || defaultConfig.model).trim() || defaultConfig.model,
+        apiKey: config.apiKey.trim() || current.apiKey,
+      };
+
+      if (next.website && !/^https?:\/\//.test(next.website)) {
+        throw new Error('官方网站必须以 http:// 或 https:// 开头。');
+      }
+
+      if (!next.baseUrl || !/^https?:\/\//.test(next.baseUrl)) {
+        throw new Error('请求 API 地址必须以 http:// 或 https:// 开头。');
+      }
+
+      if (!next.apiKey) {
+        throw new Error('请填写 API 密钥。');
+      }
+
+      const saved = await saveStoredConfig(next);
+      setConfig(displayConfig(saved));
+      setConfigSuccess('配置已保存到当前浏览器。');
+    } catch (err) {
+      setConfigError(err.message);
+    } finally {
+      setConfigSaving(false);
+    }
   }
 
   async function generateImage() {
@@ -180,32 +186,63 @@ function App() {
     setLoading(true);
 
     try {
-      const response = await fetch('/api/generate-image', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, size, quality, n: count }),
-      });
+      const storedConfig = await readStoredConfig();
 
-      const text = await response.text();
-      const payload = text ? JSON.parse(text) : {};
-
-      if (!response.ok) {
-        throw new Error(payload.error || `图片生成失败，服务返回 ${response.status}。`);
+      if (!storedConfig.apiKey || !storedConfig.baseUrl) {
+        throw new Error('请先在模型配置中设置请求 API 地址和 API Key。');
       }
 
-      const createdAt = new Date();
-      const dateStr = `${createdAt.getFullYear()}-${String(createdAt.getMonth() + 1).padStart(2, '0')}-${String(createdAt.getDate()).padStart(2, '0')}`;
+      if (!prompt.trim()) {
+        throw new Error('请输入图片提示词。');
+      }
 
-      setImages(payload.images);
+      const results = await generateImages({
+        config: storedConfig,
+        prompt: prompt.trim(),
+        size,
+        quality,
+        count,
+      });
+      const createdAt = new Date();
+      const createdAtIso = createdAt.toISOString();
+      const createdAtLabel = createdAt.toLocaleString();
+      const dateStr = dateString(createdAt);
+      const imageRecords = results.map((result) => {
+        const blob = base64ToBlob(result.b64Json, 'image/png');
+        const blobKey = createId('blob');
+        const image = {
+          id: createId('img'),
+          blobKey,
+          mimeType: 'image/png',
+          sizeBytes: blob.size,
+          revisedPrompt: result.revisedPrompt,
+          createdAt: createdAtIso,
+          previewUrl: URL.createObjectURL(blob),
+        };
+
+        return {
+          image,
+          blobRecord: {
+            key: blobKey,
+            blob,
+            createdAt: createdAtIso,
+          },
+        };
+      });
+      const nextImages = imageRecords.map((record) => record.image);
+
+      setImages(nextImages);
       setHistory(await saveHistoryItem({
         id: createdAt.getTime(),
         prompt,
         size,
         quality,
-        images: payload.images,
+        model: storedConfig.model,
+        images: nextImages.map(({ previewUrl, ...image }) => image),
         date: dateStr,
-        createdAt: createdAt.toLocaleString(),
-      }));
+        createdAt: createdAtLabel,
+        createdAtIso,
+      }, imageRecords.map((record) => record.blobRecord)));
     } catch (err) {
       setError(err.message);
     } finally {
@@ -219,10 +256,10 @@ function App() {
         <div>
           <p className="eyebrow">GPT Image Studio</p>
           <h1>本地 AI 图片生成工作台</h1>
-          <p className="subtitle">用 gpt-image-2 生成图片，API Key 只保存在本地后端。</p>
+          <p className="subtitle">用并发请求生成图片，配置和作品只保存在当前浏览器。</p>
         </div>
         <div className="hero-actions">
-          <div className="status-pill">本地代理 · 浏览器创作</div>
+          <div className="status-pill">纯前端 · 浏览器创作</div>
           <button className="config-button" type="button" onClick={openConfigPanel}>模型配置</button>
         </div>
       </section>
@@ -358,25 +395,25 @@ function App() {
         </div>
         {history.length === 0 ? (
           <p className="muted">还没有生成记录。</p>
-        ) : filteredHistory.length === 0 ? (
+        ) : historyImageItems.length === 0 ? (
           <p className="muted">这一天没有生成记录。</p>
         ) : (
           <div className="history-list">
-            {filteredHistory.map((item, index) => (
+            {historyImageItems.map((item) => (
               <button
-                key={`${item.createdAt}-${index}`}
+                key={`${item.id}-${item.image.id || item.image.blobKey || item.imageIndex}`}
                 type="button"
                 onClick={() => {
                   setPrompt(item.prompt);
                   setSize(item.size);
                   setQuality(item.quality);
-                  setImages(item.images);
+                  setImages([item.image]);
                   setError('');
                 }}
               >
-                <img src={imageSource(item.images[0])} alt="历史图片缩略图" />
+                <img src={imageSource(item.image)} alt="历史图片缩略图" />
                 <span>{item.prompt}</span>
-                <small>{item.createdAt}</small>
+                <small>{item.createdAt} · 第 {item.imageIndex + 1} 张</small>
               </button>
             ))}
           </div>
@@ -411,7 +448,7 @@ function App() {
                   <input
                     value={config.baseUrl}
                     onChange={(event) => setConfig((current) => ({ ...current, baseUrl: event.target.value }))}
-                    placeholder="https://api.openai.com/v1"
+                    placeholder="https://api.openai.com"
                   />
                 </label>
                 <label>
@@ -419,7 +456,15 @@ function App() {
                   <input
                     value={config.imagePath}
                     onChange={(event) => setConfig((current) => ({ ...current, imagePath: event.target.value }))}
-                    placeholder="/images/generations"
+                    placeholder="/v1/images/generations"
+                  />
+                </label>
+                <label>
+                  模型
+                  <input
+                    value={config.model}
+                    onChange={(event) => setConfig((current) => ({ ...current, model: event.target.value }))}
+                    placeholder="gpt-image-2"
                   />
                 </label>
                 <label>
