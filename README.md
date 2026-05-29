@@ -64,6 +64,28 @@ http://localhost:5173
 | `npm run build` | 构建前端生产版本 |
 | `npm run preview` | 预览生产构建 |
 
+## GitHub Pages 部署
+
+项目使用 GitHub Actions 部署到 GitHub Pages，工作流文件位于 `.github/workflows/deploy.yml`。
+
+仓库需要这样配置：
+
+1. 进入仓库 `Settings -> Pages`
+2. `Build and deployment` 的 `Source` 选择 `GitHub Actions`
+3. 进入 `Settings -> Environments -> github-pages`
+4. `Deployment branches and tags` 需要允许 `main` 分支部署
+5. 推送到 `main` 分支后会自动构建并部署
+
+如果部署阶段报错：
+
+```text
+Branch "main" is not allowed to deploy to github-pages due to environment protection rules.
+```
+
+说明 `github-pages` 环境的部署分支规则没有放行 `main`，按上面的第 3-4 步调整后重新运行 Actions 即可。
+
+如果使用自定义域名，请确认 `public/CNAME` 中的域名正确，并在 DNS 中配置到 GitHub Pages。
+
 ## 数据存储说明
 
 - API 配置保存在 IndexedDB 的 `settings` store 中。
