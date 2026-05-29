@@ -1,8 +1,8 @@
 # 本地 AI 图片生成工作台
 
-一个纯前端图片生成工具：前端使用 Vite + React，支持在浏览器中填写模型接口配置、生成图片、预览下载，并把创作历史保存在当前浏览器本地。
+一个纯前端图片生成工具：前端使用 Vite + React，支持在浏览器中填写模型接口配置、并发生成图片、预览下载，并把创作历史保存在当前浏览器本地。
 
-> 说明：项目已经移除本地后端代理。API Key 会保存在浏览器 `localStorage` 中，只适合个人自用或可信环境，不适合公开部署给陌生用户使用。
+> 说明：项目已经移除本地后端代理。API Key 会保存在浏览器 IndexedDB 中，只适合个人自用或可信环境，不适合公开部署给陌生用户使用。
 
 ## 快速开始
 
@@ -29,13 +29,32 @@ http://localhost:5173
 页面右上角点击“模型配置”，填写：
 
 - 官方网站：可选，用于记录服务商官网地址
-- 请求 API 地址：必填，例如 `https://api.openai.com/v1` 或支持浏览器跨域的代理地址
-- 请求接口：默认 `/images/generations`
+- 请求 API 地址：必填，例如 `https://api.openai.com` 或支持浏览器跨域的代理域名
+- 请求接口：默认 `/v1/images/generations`
+- 模型：默认 `gpt-image-2`
 - API 密钥：必填；留空保存时会保留已有密钥
 
-配置会保存到当前浏览器的 `localStorage`。
+配置会保存到当前浏览器的 IndexedDB。
 
 如果接口不允许浏览器跨域请求，生成时会失败。此时需要换成支持 CORS 的接口地址，或者重新引入服务端代理。
+
+## 生成请求
+
+点击生成时，每张图片都会单独发送一个图片生成请求，多张图片使用并发请求。
+
+请求体会包含：
+
+```json
+{
+  "model": "gpt-image-2",
+  "prompt": "你的提示词",
+  "size": "1024x1024",
+  "quality": "medium",
+  "background": "auto",
+  "output_format": "png",
+  "response_format": "b64_json"
+}
+```
 
 ## 常用命令
 
@@ -47,6 +66,7 @@ http://localhost:5173
 
 ## 数据存储说明
 
-- API 配置保存在当前浏览器的 `localStorage` 中。
-- 最近创作记录保存在当前浏览器的 IndexedDB 中。
+- API 配置保存在 IndexedDB 的 `settings` store 中。
+- 最近创作记录保存在 IndexedDB 的 `history` store 中。
+- 图片二进制保存在 IndexedDB 的 `imageBlobs` store 中，历史记录只引用图片的 `blobKey`。
 - 项目不再包含 Express、Vercel Serverless API、本地后端代理或 Electron 桌面端。
