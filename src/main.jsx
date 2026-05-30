@@ -1,17 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
-import { base64ToBlob, generateImages } from './imagesApi';
-import {
-  createId,
-  defaultConfig,
-  listHistory,
-  normalizeBaseUrl,
-  normalizeImagePath,
-  readStoredConfig,
-  saveHistoryItem,
-  saveStoredConfig,
-} from './storage';
 
 const sizes = [
   { label: '1:1 方图', value: '1024x1024' },
@@ -34,22 +23,56 @@ const presets = [
   '治愈系插画，暖色调，柔软笔触，可爱角色',
 ];
 
+const dbName = 'gpt-image-local-db';
+const storeName = 'history';
+
+function openHistoryDb() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(dbName, 1);
+
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore(storeName, { keyPath: 'id' });
+    };
+
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function getHistory() {
+  const db = await openHistoryDb();
+
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(storeName, 'readonly');
+    const request = transaction.objectStore(storeName).getAll();
+
+    request.onsuccess = () => {
+      const items = request.result.sort((a, b) => b.id - a.id).map((item) => {
+        const d = new Date(item.id);
+        return { ...item, date: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` };
+      });
+      resolve(items);
+    };
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function saveHistoryItem(item) {
+  const db = await openHistoryDb();
+
+  await new Promise((resolve, reject) => {
+    const transaction = db.transaction(storeName, 'readwrite');
+    transaction.objectStore(storeName).put(item);
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error);
+  });
+
+  return getHistory();
+}
+
 function imageSource(image) {
-  if (image.previewUrl) return image.previewUrl;
   if (image.url) return image.url;
   return `data:image/png;base64,${image.b64_json}`;
-}
-
-function displayConfig(config) {
-  return {
-    ...defaultConfig,
-    ...config,
-    apiKey: '',
-  };
-}
-
-function dateString(date) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 
 function App() {
@@ -67,7 +90,9 @@ function App() {
   const [configError, setConfigError] = useState('');
   const [configSuccess, setConfigSuccess] = useState('');
   const [config, setConfig] = useState({
-    ...defaultConfig,
+    website: '',
+    baseUrl: '',
+    imagePath: '/images/generations',
     apiKey: '',
     hasApiKey: false,
     maskedApiKey: '',
@@ -85,19 +110,13 @@ function App() {
     () => [...new Set(history.map((item) => item.date).filter(Boolean))],
     [history]
   );
-  const historyImageItems = useMemo(
-    () => history
-      .filter((item) => !historyDate || item.date === historyDate)
-      .flatMap((item) => (item.images || []).map((image, index) => ({
-        ...item,
-        image,
-        imageIndex: index,
-      }))),
+  const filteredHistory = useMemo(
+    () => history.filter((item) => !historyDate || item.date === historyDate),
     [history, historyDate]
   );
 
   useEffect(() => {
-    listHistory()
+    getHistory()
       .then(setHistory)
       .catch(() => setHistory([]));
   }, []);
@@ -118,15 +137,56 @@ function App() {
     };
   }, []);
 
-  async function loadConfig() {
+  function maskApiKey(apiKey) {
+    if (!apiKey) return '';
+    if (apiKey.length <= 10) return `${apiKey.slice(0, 3)}...`;
+    return `${apiKey.slice(0, 5)}...${apiKey.slice(-4)}`;
+  }
+
+  function normalizeBaseUrl(value) {
+    const baseUrl = String(value || '').trim().replace(/\/+$/, '');
+    if (!baseUrl) return '';
+    if (!/^https?:\/\//.test(baseUrl)) {
+      throw new Error('请求 API 地址必须以 http:// 或 https:// 开头。');
+    }
+    return baseUrl;
+  }
+
+  function normalizeWebsite(value) {
+    const website = String(value || '').trim().replace(/\/+$/, '');
+    if (!website) return '';
+    if (!/^https?:\/\//.test(website)) {
+      throw new Error('官方网站必须以 http:// 或 https:// 开头。');
+    }
+    return website;
+  }
+
+  function normalizeImagePath(value) {
+    const imagePath = String(value || '/images/generations').trim() || '/images/generations';
+    if (/^https?:\/\//.test(imagePath)) {
+      throw new Error('请求接口只能填写路径，例如 /images/generations。');
+    }
+    return `/${imagePath.replace(/^\/+/, '').replace(/\/+$/, '')}`;
+  }
+
+  function loadConfig() {
     setConfigLoading(true);
     setConfigError('');
     setConfigSuccess('');
 
     try {
-      setConfig(displayConfig(await readStoredConfig()));
+      const stored = JSON.parse(localStorage.getItem('gpt-image-config') || '{}');
+      const apiKey = stored.apiKey || '';
+      setConfig({
+        website: stored.website || '',
+        baseUrl: stored.baseUrl || '',
+        imagePath: stored.imagePath || '/images/generations',
+        apiKey: '',
+        hasApiKey: Boolean(apiKey),
+        maskedApiKey: maskApiKey(apiKey),
+      });
     } catch (err) {
-      setConfigError(err.message);
+      setConfigError('读取本地配置失败。');
     } finally {
       setConfigLoading(false);
     }
@@ -150,30 +210,28 @@ function App() {
     setConfigSuccess('');
 
     try {
-      const current = await readStoredConfig();
+      const stored = JSON.parse(localStorage.getItem('gpt-image-config') || '{}');
       const next = {
-        website: normalizeBaseUrl(config.website),
+        website: normalizeWebsite(config.website),
         baseUrl: normalizeBaseUrl(config.baseUrl),
         imagePath: normalizeImagePath(config.imagePath),
-        model: String(config.model || defaultConfig.model).trim() || defaultConfig.model,
-        apiKey: config.apiKey.trim() || current.apiKey,
+        apiKey: config.apiKey.trim() || stored.apiKey || '',
       };
+      localStorage.setItem('gpt-image-config', JSON.stringify(next));
 
-      if (next.website && !/^https?:\/\//.test(next.website)) {
-        throw new Error('官方网站必须以 http:// 或 https:// 开头。');
-      }
-
-      if (!next.baseUrl || !/^https?:\/\//.test(next.baseUrl)) {
-        throw new Error('请求 API 地址必须以 http:// 或 https:// 开头。');
-      }
-
-      if (!next.apiKey) {
-        throw new Error('请填写 API 密钥。');
-      }
-
-      const saved = await saveStoredConfig(next);
-      setConfig(displayConfig(saved));
-      setConfigSuccess('配置已保存到当前浏览器。');
+      setConfig({
+        website: next.website,
+        baseUrl: next.baseUrl,
+        imagePath: next.imagePath,
+        apiKey: '',
+        hasApiKey: Boolean(next.apiKey),
+        maskedApiKey: maskApiKey(next.apiKey),
+      });
+      setConfigSuccess('配置已保存到本地浏览器。');
+      setTimeout(() => {
+        setConfigOpen(false);
+        setConfigSuccess('');
+      }, 1500);
     } catch (err) {
       setConfigError(err.message);
     } finally {
@@ -186,63 +244,65 @@ function App() {
     setLoading(true);
 
     try {
-      const storedConfig = await readStoredConfig();
-
-      if (!storedConfig.apiKey || !storedConfig.baseUrl) {
-        throw new Error('请先在模型配置中设置请求 API 地址和 API Key。');
+      const stored = JSON.parse(localStorage.getItem('gpt-image-config') || '{}');
+      if (!stored.apiKey || !stored.baseUrl) {
+        throw new Error('请先在「模型配置」中填入请求 API 地址和 API Key。');
       }
 
-      if (!prompt.trim()) {
+      if (typeof prompt !== 'string' || !prompt.trim()) {
         throw new Error('请输入图片提示词。');
       }
 
-      const results = await generateImages({
-        config: storedConfig,
-        prompt: prompt.trim(),
-        size,
-        quality,
-        count,
-      });
-      const createdAt = new Date();
-      const createdAtIso = createdAt.toISOString();
-      const createdAtLabel = createdAt.toLocaleString();
-      const dateStr = dateString(createdAt);
-      const imageRecords = results.map((result) => {
-        const blob = base64ToBlob(result.b64Json, 'image/png');
-        const blobKey = createId('blob');
-        const image = {
-          id: createId('img'),
-          blobKey,
-          mimeType: 'image/png',
-          sizeBytes: blob.size,
-          revisedPrompt: result.revisedPrompt,
-          createdAt: createdAtIso,
-          previewUrl: URL.createObjectURL(blob),
-        };
+      const imageCount = Math.min(Math.max(Number(count) || 1, 1), 4);
+      const baseUrl = String(stored.baseUrl).replace(/\/+$/, '');
+      const imagePath = `/${String(stored.imagePath || '/images/generations').replace(/^\/+/, '').replace(/\/+$/, '')}`;
+      const results = [];
 
-        return {
-          image,
-          blobRecord: {
-            key: blobKey,
-            blob,
-            createdAt: createdAtIso,
+      for (let index = 0; index < imageCount; index += 1) {
+        const response = await fetch('/api/proxy', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-target-url': `${baseUrl}${imagePath}`,
+            'x-api-key': stored.apiKey,
           },
-        };
-      });
-      const nextImages = imageRecords.map((record) => record.image);
+          body: JSON.stringify({
+            model: 'gpt-image-2',
+            prompt: prompt.trim(),
+            size,
+            quality,
+            n: 1,
+          }),
+        });
 
-      setImages(nextImages);
+        const text = await response.text();
+        const payload = text && text.trim().startsWith('{') ? JSON.parse(text) : null;
+
+        if (!response.ok || !payload) {
+          throw new Error(payload?.error?.message || payload?.error || `图片生成失败，上游返回 ${response.status}。`);
+        }
+
+        results.push(...payload.data);
+      }
+
+      const images = results.map((image) => ({
+        url: image.url,
+        b64_json: image.b64_json,
+      }));
+
+      const createdAt = new Date();
+      const dateStr = `${createdAt.getFullYear()}-${String(createdAt.getMonth() + 1).padStart(2, '0')}-${String(createdAt.getDate()).padStart(2, '0')}`;
+
+      setImages(images);
       setHistory(await saveHistoryItem({
         id: createdAt.getTime(),
         prompt,
         size,
         quality,
-        model: storedConfig.model,
-        images: nextImages.map(({ previewUrl, ...image }) => image),
+        images,
         date: dateStr,
-        createdAt: createdAtLabel,
-        createdAtIso,
-      }, imageRecords.map((record) => record.blobRecord)));
+        createdAt: createdAt.toLocaleString(),
+      }));
     } catch (err) {
       setError(err.message);
     } finally {
@@ -256,10 +316,10 @@ function App() {
         <div>
           <p className="eyebrow">GPT Image Studio</p>
           <h1>本地 AI 图片生成工作台</h1>
-          <p className="subtitle">用并发请求生成图片，配置和作品只保存在当前浏览器。</p>
+          <p className="subtitle">用 gpt-image-2 生成图片，API Key 仅保存在你当前浏览器。</p>
         </div>
         <div className="hero-actions">
-          <div className="status-pill">纯前端 · 浏览器创作</div>
+          <div className="status-pill">浏览器直连 · 本地存储</div>
           <button className="config-button" type="button" onClick={openConfigPanel}>模型配置</button>
         </div>
       </section>
@@ -395,25 +455,25 @@ function App() {
         </div>
         {history.length === 0 ? (
           <p className="muted">还没有生成记录。</p>
-        ) : historyImageItems.length === 0 ? (
+        ) : filteredHistory.length === 0 ? (
           <p className="muted">这一天没有生成记录。</p>
         ) : (
           <div className="history-list">
-            {historyImageItems.map((item) => (
+            {filteredHistory.map((item, index) => (
               <button
-                key={`${item.id}-${item.image.id || item.image.blobKey || item.imageIndex}`}
+                key={`${item.createdAt}-${index}`}
                 type="button"
                 onClick={() => {
                   setPrompt(item.prompt);
                   setSize(item.size);
                   setQuality(item.quality);
-                  setImages([item.image]);
+                  setImages(item.images);
                   setError('');
                 }}
               >
-                <img src={imageSource(item.image)} alt="历史图片缩略图" />
+                <img src={imageSource(item.images[0])} alt="历史图片缩略图" />
                 <span>{item.prompt}</span>
-                <small>{item.createdAt} · 第 {item.imageIndex + 1} 张</small>
+                <small>{item.createdAt}</small>
               </button>
             ))}
           </div>
@@ -448,7 +508,7 @@ function App() {
                   <input
                     value={config.baseUrl}
                     onChange={(event) => setConfig((current) => ({ ...current, baseUrl: event.target.value }))}
-                    placeholder="https://api.openai.com"
+                    placeholder="https://api.openai.com/v1"
                   />
                 </label>
                 <label>
@@ -456,15 +516,7 @@ function App() {
                   <input
                     value={config.imagePath}
                     onChange={(event) => setConfig((current) => ({ ...current, imagePath: event.target.value }))}
-                    placeholder="/v1/images/generations"
-                  />
-                </label>
-                <label>
-                  模型
-                  <input
-                    value={config.model}
-                    onChange={(event) => setConfig((current) => ({ ...current, model: event.target.value }))}
-                    placeholder="gpt-image-2"
+                    placeholder="/images/generations"
                   />
                 </label>
                 <label>
