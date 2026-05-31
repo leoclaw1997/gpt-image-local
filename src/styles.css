@@ -46,6 +46,7 @@ button {
 .hero {
   align-items: center;
   justify-content: space-between;
+  margin-top: -20px;
   margin-bottom: 28px;
 }
 
@@ -86,6 +87,44 @@ h2 {
   flex: 0 0 auto;
   gap: 10px;
   justify-items: end;
+}
+
+.hero-actions-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.github-links {
+  display: flex;
+  gap: 8px;
+}
+
+.github-link {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  padding: 8px 14px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #e4d9ff;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: all 0.2s;
+  backdrop-filter: blur(12px);
+}
+
+.github-link:hover {
+  border-color: rgba(205, 156, 255, 0.5);
+  background: rgba(141, 92, 255, 0.12);
+  color: #f4ebff;
+  transform: translateY(-1px);
+}
+
+.github-link svg {
+  flex-shrink: 0;
 }
 
 .status-pill {
@@ -672,6 +711,11 @@ select {
   .history-filter {
     width: 100%;
     justify-content: flex-start;
+  }
+
+  .github-links {
+    width: 100%;
+    justify-content: center;
   }
 }
 
