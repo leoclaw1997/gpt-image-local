@@ -122,6 +122,10 @@ function App() {
   }, []);
 
   useEffect(() => {
+    applyUrlConfigParams();
+  }, []);
+
+  useEffect(() => {
     if (!creatorPanelRef.current) return undefined;
 
     const updateHeight = () => setCreatorPanelHeight(creatorPanelRef.current.offsetHeight);
@@ -167,6 +171,79 @@ function App() {
       throw new Error('请求接口只能填写路径，例如 /images/generations。');
     }
     return `/${imagePath.replace(/^\/+/, '').replace(/\/+$/, '')}`;
+  }
+
+  function normalizeApiUrlParam(value) {
+    const apiUrl = normalizeBaseUrl(value);
+
+    if (/\/v1\/images\/generations$/i.test(apiUrl)) {
+      return {
+        baseUrl: apiUrl.replace(/\/v1\/images\/generations$/i, ''),
+        imagePath: '/v1/images/generations',
+      };
+    }
+
+    if (/\/images\/generations$/i.test(apiUrl)) {
+      return {
+        baseUrl: apiUrl.replace(/\/images\/generations$/i, ''),
+        imagePath: '/images/generations',
+      };
+    }
+
+    if (/\/v1$/i.test(apiUrl)) {
+      return {
+        baseUrl: apiUrl,
+        imagePath: '/images/generations',
+      };
+    }
+
+    return {
+      baseUrl: apiUrl,
+      imagePath: '/v1/images/generations',
+    };
+  }
+
+  function applyUrlConfigParams() {
+    const searchParams = new URLSearchParams(window.location.search);
+    const apiUrl = searchParams.get('apiUrl') || searchParams.get('apiBaseUrl');
+    const apiKey = searchParams.get('apiKey');
+
+    if (apiUrl === null && apiKey === null) return;
+
+    try {
+      const stored = JSON.parse(localStorage.getItem('gpt-image-config') || '{}');
+      const next = { ...stored };
+
+      if (apiUrl !== null) {
+        const urlConfig = normalizeApiUrlParam(apiUrl);
+        next.baseUrl = urlConfig.baseUrl;
+        next.imagePath = urlConfig.imagePath;
+      }
+
+      if (apiKey !== null) {
+        next.apiKey = apiKey.trim();
+      }
+
+      localStorage.setItem('gpt-image-config', JSON.stringify(next));
+
+      setConfig((current) => ({
+        ...current,
+        baseUrl: next.baseUrl || '',
+        imagePath: next.imagePath || current.imagePath,
+        apiKey: '',
+        hasApiKey: Boolean(next.apiKey),
+        maskedApiKey: maskApiKey(next.apiKey || ''),
+      }));
+
+      searchParams.delete('apiUrl');
+      searchParams.delete('apiBaseUrl');
+      searchParams.delete('apiKey');
+      const nextSearch = searchParams.toString();
+      const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash}`;
+      window.history.replaceState(null, '', nextUrl);
+    } catch (err) {
+      setError(err.message || 'URL 配置参数无效。');
+    }
   }
 
   function loadConfig() {
