@@ -25,6 +25,8 @@ const presets = [
 
 const dbName = 'gpt-image-local-db';
 const storeName = 'history';
+const maxReferenceImages = 4;
+const maxReferenceBytes = 20 * 1024 * 1024;
 
 function openHistoryDb() {
   return new Promise((resolve, reject) => {
@@ -75,11 +77,26 @@ function imageSource(image) {
   return `data:image/png;base64,${image.b64_json}`;
 }
 
+function editPathFromImagePath(imagePath) {
+  const normalized = `/${String(imagePath || '/images/generations').replace(/^\/+/, '').replace(/\/+$/, '')}`;
+
+  if (/\/images\/generations$/i.test(normalized)) {
+    return normalized.replace(/\/images\/generations$/i, '/images/edits');
+  }
+
+  if (/\/generations$/i.test(normalized)) {
+    return normalized.replace(/\/generations$/i, '/edits');
+  }
+
+  return '/images/edits';
+}
+
 function App() {
   const [prompt, setPrompt] = useState('一只穿着宇航服的橘猫站在月球上，背后是蓝色地球，电影感光影');
   const [size, setSize] = useState('1024x1024');
   const [quality, setQuality] = useState('medium');
   const [count, setCount] = useState(1);
+  const [referenceImages, setReferenceImages] = useState([]);
   const [images, setImages] = useState([]);
   const [history, setHistory] = useState([]);
   const [historyDate, setHistoryDate] = useState('');
@@ -100,6 +117,7 @@ function App() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const creatorPanelRef = useRef(null);
+  const referenceImagesRef = useRef([]);
   const [creatorPanelHeight, setCreatorPanelHeight] = useState(null);
 
   const selectedSizeLabel = useMemo(
@@ -119,6 +137,14 @@ function App() {
     getHistory()
       .then(setHistory)
       .catch(() => setHistory([]));
+  }, []);
+
+  useEffect(() => {
+    referenceImagesRef.current = referenceImages;
+  }, [referenceImages]);
+
+  useEffect(() => () => {
+    referenceImagesRef.current.forEach((image) => URL.revokeObjectURL(image.previewUrl));
   }, []);
 
   useEffect(() => {
@@ -316,6 +342,95 @@ function App() {
     }
   }
 
+  function addReferenceImages(files) {
+    const imageFiles = Array.from(files || []).filter((file) => file.type.startsWith('image/'));
+
+    if (!imageFiles.length) return;
+
+    setReferenceImages((current) => {
+      const slots = Math.max(maxReferenceImages - current.length, 0);
+      const accepted = imageFiles.slice(0, slots).map((file) => ({
+        id: `${file.name}-${file.lastModified}-${crypto.randomUUID?.() || Date.now()}`,
+        name: file.name,
+        file,
+        size: file.size,
+        previewUrl: URL.createObjectURL(file),
+      }));
+
+      return [...current, ...accepted];
+    });
+  }
+
+  function removeReferenceImage(id) {
+    setReferenceImages((current) => {
+      const target = current.find((image) => image.id === id);
+      if (target) URL.revokeObjectURL(target.previewUrl);
+      return current.filter((image) => image.id !== id);
+    });
+  }
+
+  function clearReferenceImages() {
+    setReferenceImages((current) => {
+      current.forEach((image) => URL.revokeObjectURL(image.previewUrl));
+      return [];
+    });
+  }
+
+  async function requestImageGeneration({ baseUrl, imagePath, apiKey }) {
+    const response = await fetch('/api/proxy', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-target-url': `${baseUrl}${imagePath}`,
+        'x-api-key': apiKey,
+      },
+      body: JSON.stringify({
+        model: 'gpt-image-2',
+        prompt: prompt.trim(),
+        size,
+        quality,
+        n: 1,
+      }),
+    });
+
+    return parseProxyImageResponse(response);
+  }
+
+  async function requestImageEdit({ baseUrl, editPath, apiKey }) {
+    const body = new FormData();
+    body.append('model', 'gpt-image-2');
+    body.append('prompt', prompt.trim());
+    referenceImages.forEach((image) => {
+      body.append('image[]', image.file, image.name);
+    });
+    body.append('size', size);
+    body.append('background', 'auto');
+    body.append('output_format', 'png');
+    body.append('response_format', 'b64_json');
+
+    const response = await fetch('/api/proxy', {
+      method: 'POST',
+      headers: {
+        'x-target-url': `${baseUrl}${editPath}`,
+        'x-api-key': apiKey,
+      },
+      body,
+    });
+
+    return parseProxyImageResponse(response);
+  }
+
+  async function parseProxyImageResponse(response) {
+    const text = await response.text();
+    const payload = text && text.trim().startsWith('{') ? JSON.parse(text) : null;
+
+    if (!response.ok || !payload) {
+      throw new Error(payload?.error?.message || payload?.error || `图片生成失败，上游返回 ${response.status}。`);
+    }
+
+    return payload;
+  }
+
   async function generateImage() {
     setError('');
     setLoading(true);
@@ -333,32 +448,18 @@ function App() {
       const imageCount = Math.min(Math.max(Number(count) || 1, 1), 4);
       const baseUrl = String(stored.baseUrl).replace(/\/+$/, '');
       const imagePath = `/${String(stored.imagePath || '/images/generations').replace(/^\/+/, '').replace(/\/+$/, '')}`;
+      const editPath = editPathFromImagePath(imagePath);
+      const referenceBytes = referenceImages.reduce((sum, image) => sum + image.size, 0);
       const results = [];
 
+      if (referenceBytes > maxReferenceBytes) {
+        throw new Error('参考图片总大小超过 20MB，请减少图片数量或压缩后重试。');
+      }
+
       for (let index = 0; index < imageCount; index += 1) {
-        const response = await fetch('/api/proxy', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-target-url': `${baseUrl}${imagePath}`,
-            'x-api-key': stored.apiKey,
-          },
-          body: JSON.stringify({
-            model: 'gpt-image-2',
-            prompt: prompt.trim(),
-            size,
-            quality,
-            n: 1,
-          }),
-        });
-
-        const text = await response.text();
-        const payload = text && text.trim().startsWith('{') ? JSON.parse(text) : null;
-
-        if (!response.ok || !payload) {
-          throw new Error(payload?.error?.message || payload?.error || `图片生成失败，上游返回 ${response.status}。`);
-        }
-
+        const payload = referenceImages.length
+          ? await requestImageEdit({ baseUrl, editPath, apiKey: stored.apiKey })
+          : await requestImageGeneration({ baseUrl, imagePath, apiKey: stored.apiKey });
         results.push(...payload.data);
       }
 
@@ -376,6 +477,7 @@ function App() {
         prompt,
         size,
         quality,
+        referenceNames: referenceImages.map((image) => image.name),
         images,
         date: dateStr,
         createdAt: createdAt.toLocaleString(),
@@ -433,6 +535,38 @@ function App() {
                 {item}
               </button>
             ))}
+          </div>
+
+          <div className="reference-panel">
+            <div className="reference-header">
+              <span className="field-label">参考图片</span>
+              {referenceImages.length > 0 && (
+                <button className="text-button" type="button" onClick={clearReferenceImages}>清空</button>
+              )}
+            </div>
+            <label className="upload-dropzone">
+              <input
+                type="file"
+                accept="image/*"
+                multiple
+                onChange={(event) => {
+                  addReferenceImages(event.target.files);
+                  event.target.value = '';
+                }}
+              />
+              <span>上传参考图进行修改</span>
+              <small>最多 {maxReferenceImages} 张，总大小不超过 20MB</small>
+            </label>
+            {referenceImages.length > 0 && (
+              <div className="reference-grid">
+                {referenceImages.map((image) => (
+                  <div className="reference-card" key={image.id}>
+                    <img src={image.previewUrl} alt={image.name} />
+                    <button type="button" onClick={() => removeReferenceImage(image.id)} aria-label={`移除 ${image.name}`}>移除</button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="control-group">

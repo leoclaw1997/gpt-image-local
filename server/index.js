@@ -91,6 +91,19 @@ const runtimeConfig = {
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(distPath));
 
+function isMultipartRequest(req) {
+  return req.headers['content-type']?.toLowerCase().startsWith('multipart/form-data') ?? false;
+}
+
+function readRawRequestBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
 app.get('/api/config', (req, res) => {
   res.json(publicConfig());
 });
@@ -118,6 +131,7 @@ app.post('/api/config', async (req, res) => {
 app.post('/api/proxy', async (req, res) => {
   const target = req.headers['x-target-url'];
   const apiKey = req.headers['x-api-key'];
+  const contentType = req.headers['content-type'] || '';
 
   if (!target || !apiKey) {
     return res.status(400).json({ error: '缺少目标地址或 API Key。' });
@@ -128,13 +142,17 @@ app.post('/api/proxy', async (req, res) => {
   }
 
   try {
+    const multipart = isMultipartRequest(req);
+    const body = multipart ? await readRawRequestBody(req) : JSON.stringify(req.body || {});
+    const headers = {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': multipart ? contentType : 'application/json',
+    };
+
     const response = await fetch(target, {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(req.body || {}),
+      headers,
+      body,
     });
 
     const text = await response.text();

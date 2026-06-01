@@ -1,3 +1,18 @@
+export const config = {
+  api: {
+    bodyParser: false,
+  },
+};
+
+function readRawRequestBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -5,6 +20,7 @@ export default async function handler(req, res) {
 
   const target = req.headers['x-target-url'];
   const apiKey = req.headers['x-api-key'];
+  const contentType = req.headers['content-type'] || 'application/json';
 
   if (!target || !apiKey) {
     return res.status(400).json({ error: '缺少目标地址或 API Key。' });
@@ -15,13 +31,14 @@ export default async function handler(req, res) {
   }
 
   try {
+    const body = await readRawRequestBody(req);
     const response = await fetch(target, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
+        'Content-Type': contentType,
       },
-      body: JSON.stringify(req.body || {}),
+      body,
     });
 
     const text = await response.text();

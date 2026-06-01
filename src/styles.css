@@ -232,6 +232,94 @@ input:focus {
   line-height: 1.45;
 }
 
+.reference-panel {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 24px;
+}
+
+.reference-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.reference-header .field-label {
+  display: block;
+}
+
+.text-button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: #c9a7ff;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.upload-dropzone {
+  display: grid;
+  gap: 4px;
+  border: 1px dashed rgba(205, 156, 255, 0.38);
+  border-radius: 18px;
+  padding: 16px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #f3edff;
+  cursor: pointer;
+}
+
+.upload-dropzone input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.upload-dropzone span {
+  font-weight: 800;
+}
+
+.upload-dropzone small {
+  color: #a99cc5;
+}
+
+.reference-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.reference-card {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 16px;
+  aspect-ratio: 1;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.reference-card img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.reference-card button {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  border: 0;
+  border-radius: 999px;
+  padding: 5px 8px;
+  background: rgba(0, 0, 0, 0.68);
+  color: white;
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .control-group {
   margin-bottom: 18px;
 }
